@@ -156,6 +156,7 @@ namespace RC::LuaMadeSimple
             NewIndex,
             Call,
             Equal,
+            Length,
         };
 
         /**
@@ -168,6 +169,7 @@ namespace RC::LuaMadeSimple
             std::optional<LuaFunction> new_index = std::nullopt;
             std::optional<LuaFunction> call = std::nullopt;
             std::optional<LuaFunction> equal = std::nullopt;
+            std::optional<LuaFunction> length = std::nullopt;
 
             template<typename LuaCallable>
             auto create(MetaMethod metamethod, LuaCallable lua_callable) -> void
@@ -188,6 +190,9 @@ namespace RC::LuaMadeSimple
                         return;
                     case MetaMethod::Equal:
                         equal = lua_callable;
+                        return;
+                    case MetaMethod::Length:
+                        length = lua_callable;
                 }
 
                 // TODO: use throw_error() here
@@ -285,6 +290,10 @@ namespace RC::LuaMadeSimple
                               std::is_same_v<ValueType, char*>)
                 {
                     lua_pushstring(get_lua_instance().get_lua_state(), value);
+                }
+                else if constexpr (std::is_same_v<ValueType, bool>)
+                {
+                    lua_pushboolean(get_lua_instance().get_lua_state(), value);
                 }
                 else if constexpr (std::is_same_v<ValueType, int> || std::is_same_v<ValueType, long long>)
                 {
@@ -529,6 +538,9 @@ namespace RC::LuaMadeSimple
         // Use discard_value() if you have values on the stack that you require to be gone
         RC_LMS_API auto discard_value(int32_t force_index = 1) const -> void;
 
+        // Copy value from from_index to force_index, shifting values on stack to top
+        RC_LMS_API auto insert_value(int32_t from_index = -1, int32_t force_index = 1) const -> void;
+
         [[nodiscard]] RC_LMS_API auto is_nil(int32_t force_index = 1) const -> bool;
         RC_LMS_API auto set_nil() const -> void;
 
@@ -578,19 +590,19 @@ namespace RC::LuaMadeSimple
         RC_LMS_API auto construct_metamethods_object(const OptionalMetaMethods&, std::optional<std::string_view> metatable_name = std::nullopt) const -> void;
 
     public:
-        // Transfer ownership of a C++ object stored on the stack to Lua via userdata
+        // Create a new metatable and put references to member functions table in it
         // A metatable is automatically attached with a __gc metamethod that calls the ObjectType destructor
         // More metamethods can be supplied via the 'metamethods' parameter (see the 'MetaMethods' struct)
         template<typename ObjectType>
-        auto transfer_stack_object(ObjectType&& object, std::optional<std::string_view> metatable_name = std::nullopt, OptionalMetaMethods metamethods = std::nullopt, bool is_metamethod_container = false) const -> void
+        auto new_metatable(std::optional<std::string_view> metatable_name = std::nullopt, OptionalMetaMethods metamethods = std::nullopt) const -> void
         {
-            auto create_auto_gc_metamethod = [](Table& metatable){
+            auto create_auto_gc_metamethod = [](Table& metatable) {
                 metatable.add_pair("__gc", [](lua_State* lua_state) -> int {
                     auto* userdata = static_cast<ObjectType*>(lua_touserdata(lua_state, 1));
                     userdata->~ObjectType();
 
                     return 0;
-                });
+                    });
             };
 
             bool custom_gc_method{};
@@ -599,10 +611,7 @@ namespace RC::LuaMadeSimple
             {
                 // At least some metamethods might have been provided
 
-                m_working_metatable_name = metatable_name.value();
-                m_working_metamethods = metamethods;
-
-                Table metatable = prepare_new_metatable(m_working_metatable_name.data());
+                Table metatable = prepare_new_metatable(metatable_name.value().data());
 
                 custom_gc_method = add_metamethods(metamethods.value(), metatable);
                 if (!custom_gc_method)
@@ -613,25 +622,56 @@ namespace RC::LuaMadeSimple
             }
             else
             {
+                auto no_gc_metatable = metatable_name.has_value() ? metatable_name.value().data() : "AutoGCMetatable";
                 // No metamethods of any kind was provided
-
-                Table metatable = prepare_new_metatable("AutoGCMetatable");
-
-                // We know that the user didn't provide their own '__gc' metamethod so we can safely attach our own
-                create_auto_gc_metamethod(metatable);
+                Table metatable = get_metatable(no_gc_metatable);
+                if (is_nil(-1))
+                {
+                    discard_value(-1);
+                    prepare_new_metatable(no_gc_metatable);
+                    // We know that the user didn't provide their own '__gc' metamethod so we can safely attach our own
+                    create_auto_gc_metamethod(metatable);
+                }
             }
+            if (is_table(-2)) // if called from construct_metamethods_object this will be false
+            {
+                lua_insert(get_lua_state(), -2);
+                lua_rawseti(get_lua_state(), -2, 1);
+            }
+        }
 
+        // Transfer ownership of a C++ object stored on the stack to Lua via userdata
+        // More metamethods can be supplied via the 'metamethods' parameter (see the 'MetaMethods' struct)
+        template<typename ObjectType>
+        auto transfer_stack_object(ObjectType&& object, std::optional<std::string_view> metatable_name = std::nullopt, OptionalMetaMethods metamethods = std::nullopt, bool is_metamethod_container = false) const -> void
+        {
             auto* userdata = static_cast<ObjectType*>(lua_newuserdatauv(get_lua_state(), sizeof(ObjectType), 4));
 
             // Set a user value that tells 'get_userdata()' that this userdata is a stack object owned by lua
             set_integer(UserdataInternalType::LuaOwnedStackObject);
             lua_setiuservalue(get_lua_state(), -2, 2);
 
+            // Attach metamembers table to useradata
+            if (lua_rawgeti(get_lua_state(), -2, 1) == LUA_TTABLE)
+            {
+                lua_setiuservalue(get_lua_state(), -2, 3);
+            }
+            else
+            {
+                discard_value(-1);
+            }
+
             if (!is_metamethod_container)
             {
                 // Set a user value that contains the metamethod handlers
-                construct_metamethods_object(metamethods, "MetaMethodContainer");
-                lua_setiuservalue(get_lua_state(), -2, 3);
+                if (lua_rawgeti(get_lua_state(), -2, 2) == LUA_TNIL)
+                {
+                    discard_value(-1);
+                    construct_metamethods_object(metamethods, "MetaMethodContainer");
+                    lua_pushvalue(get_lua_state(), -1);
+                    lua_rawseti(get_lua_state(), -4, 2);
+                }
+                lua_setiuservalue(get_lua_state(), -2, 4);
             }
 
             // Set a user value that determines whether this is a polymorphic type.
@@ -644,7 +684,7 @@ namespace RC::LuaMadeSimple
             {
                 set_bool(false);
             }
-            lua_setiuservalue(get_lua_state(), -2, 4);
+            lua_setiuservalue(get_lua_state(), -2, 5);
 
             new(userdata) ObjectType(std::move(object));
 
