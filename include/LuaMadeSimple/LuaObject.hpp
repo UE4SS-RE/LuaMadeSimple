@@ -93,13 +93,19 @@ namespace RC::LuaMadeSimple::Type
         {
             RemoteObject<ObjectType> lua_object{object_ptr};
 
-            LuaMadeSimple::Lua::Table table = lua.prepare_new_table();
+            auto metatable_name = "TrivialObject";
 
-            // Setup functions that can be called on this object
-            setup_member_functions<IsFinal::Yes>(table);
+            LuaMadeSimple::Lua::Table table = lua.get_metatable(metatable_name);
+            if (lua.is_nil(-1))
+            {
+                lua.discard_value(-1);
+                lua.prepare_new_table();
+                setup_member_functions<LuaMadeSimple::Type::IsFinal::Yes>(table);
+                lua.new_metatable<RemoteObject<ObjectType>>(metatable_name, table.get_metamethods());
+            }
 
-            // Transfer the object & its ownership fully to Lua
-            lua.transfer_stack_object(std::move(lua_object), "TrivialObject", table.get_metamethods());
+            // Create object & surrender ownership to Lua
+            lua.transfer_stack_object(std::move(lua_object), metatable_name, table.get_metamethods());
 
             return table;
         }
@@ -119,10 +125,10 @@ namespace RC::LuaMadeSimple::Type
 
     public:
         template<IsFinal is_final>
-        auto static setup_member_functions(LuaMadeSimple::Lua::Table& table/*, IsFinal is_final*/) -> void
+        auto static setup_member_functions(LuaMadeSimple::Lua::Table& table) -> void
         {
             table.add_pair("GetAddress", [](const LuaMadeSimple::Lua& lua) -> int {
-                lua_getiuservalue(lua.get_lua_state(), 1, 4);
+                lua_getiuservalue(lua.get_lua_state(), 1, 5);
                 if (lua_toboolean(lua.get_lua_state(), -1))
                 {
                     lua.throw_error("Call to RemoteObject:GetAddress on polymorphic type is not allowed, please override GetAddress.");
@@ -134,10 +140,10 @@ namespace RC::LuaMadeSimple::Type
             });
 
             table.add_pair("IsValid", [](const LuaMadeSimple::Lua& lua) -> int {
-                lua_getiuservalue(lua.get_lua_state(), 1, 4);
+                lua_getiuservalue(lua.get_lua_state(), 1, 5);
                 if (lua_toboolean(lua.get_lua_state(), -1))
                 {
-                    lua.throw_error("Call to RemoteObject:IsValid on polymorphic type is not allowed, please override GetAddress.");
+                    lua.throw_error("Call to RemoteObject:IsValid on polymorphic type is not allowed, please override IsValid.");
                 }
 
                 const RemoteObject& lua_object = lua.get_userdata<RemoteObject>();
@@ -156,8 +162,6 @@ namespace RC::LuaMadeSimple::Type
             // These will then be set only if this is the final object (nothing overrides it later)
             if constexpr (is_final == LuaMadeSimple::Type::IsFinal::Yes)
             {
-                table.make_global("ComplexObject");
-
                 table.get_metamethods().create(LuaMadeSimple::Lua::MetaMethod::Index, [](const LuaMadeSimple::Lua& lua) -> int {
                     RemoteObject<ObjectType>& lua_object = lua.get_userdata<RemoteObject<ObjectType>>();
                     lua_object.get_pusher_callable()(lua, lua_object.get_remote_cpp_object());

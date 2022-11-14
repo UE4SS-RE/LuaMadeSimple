@@ -11,17 +11,9 @@ namespace RC::LuaMadeSimple
     static GlobalState global_state = GlobalState::Ready;
 
     // All lua instances, lua_State* are stored in the Lua class
-    static std::vector<std::unique_ptr<Lua>> lua_instances;
+    static std::unordered_map<lua_State*, std::shared_ptr<Lua>> lua_instances;
 
-    struct LuaFunctionData
-    {
-        const Lua& owner;
-        using LuaFunctionVector = std::vector<std::optional<Lua::LuaFunction>>;
-        LuaFunctionVector functions;
-    };
-
-    static std::unordered_map<lua_State*, LuaFunctionData> lua_functions;
-    static std::unordered_map<lua_State*, LuaFunctionData> lua_metamethod_functions;
+    static std::vector<std::optional<Lua::LuaFunction>> lua_functions;
 
     // Current errors for all lua states
     static std::unordered_map<lua_State*, std::string> lua_state_errors;
@@ -110,26 +102,16 @@ namespace RC::LuaMadeSimple
 
     auto Lua::Table::add_function_value_internal(Lua::LuaFunction function) const -> void
     {
-        if (lua_functions.contains(get_lua_instance().get_lua_state()))
-        {
-            lua_functions.find(get_lua_instance().get_lua_state())->second.functions.emplace_back(function);
-        }
-        else
-        {
-            lua_functions.emplace(get_lua_instance().get_lua_state(), LuaFunctionData{get_lua_instance(), {{function}}});
-        }
+        lua_functions.emplace_back(LuaFunction{function});
 
         // Upvalues for process_lua_function
         // Upvalue #1: Function id
-        lua_pushinteger(get_lua_instance().get_lua_state(), lua_functions.find(get_lua_instance().get_lua_state())->second.functions.size() - 1);
+        lua_pushinteger(get_lua_instance().get_lua_state(), lua_functions.size() - 1);
 
         // Upvalue #2: Function type
         lua_pushinteger(get_lua_instance().get_lua_state(), static_cast<lua_Integer>(m_has_userdata ? LuaFunctionType::Local : LuaFunctionType::Table));
 
-        // Upvalue #3: If the function is a metamethod then this is the name of the global metatable
-        lua_pushstring(get_lua_instance().get_lua_state(), get_lua_instance().m_working_metatable_name.data());
-
-        lua_pushcclosure(get_lua_instance().get_lua_state(), &process_lua_function, 3);
+        lua_pushcclosure(get_lua_instance().get_lua_state(), &process_lua_function, 2);
     }
 
     auto Lua::Table::get_lua_instance() const -> const Lua&
@@ -365,70 +347,55 @@ namespace RC::LuaMadeSimple
             }
         };
 
+        // Hide metatable from lua scripts
+        metatable.add_pair("__metatable", false);
+
         // Create the '__index' metamethod
         // This one will always exist but the user supplied callable might not
         metatable.add_pair("__index", [](const LuaMadeSimple::Lua& lua) -> int {
-            std::string_view metatable_name = lua_tostring(lua.get_lua_state(), lua_upvalueindex(3));
-
-            // Get the global table that corresponds to this metatable
-            if (lua_getglobal(lua.get_lua_state(), metatable_name.data()) == LUA_TNIL)
+            if (lua.is_userdata(-2))
             {
-                lua_pop(lua.get_lua_state(), 1);
-                luaL_traceback(lua.get_lua_state(), lua.get_lua_state(), nullptr, 0);
-                throw std::runtime_error{"System: Global for __index doesn't exist."};
-            }
-
-            // Push the member_name to the top of the stack for lua_raw_get
-            lua_pushvalue(lua.get_lua_state(), -2);
-            if (lua_rawget(lua.get_lua_state(), -2) != LUA_TNIL)
-            {
-                return 1;
-            }
-            else
-            {
-                // Pop the table from lua_getglobal and the nil from lua_rawget
-                lua_pop(lua.get_lua_state(), 2);
-
-                if (lua.m_working_metamethods.has_value())
+                // Get the global table that corresponds to this metatable
+                if (lua_getiuservalue(lua.get_lua_state(), -2, 3) == LUA_TNIL)
                 {
-                    // I'm pretty sure that this is the problem
-                    // This variable gets overridden every time a call to transfer_stack_object / share_heap_object is placed
-                    // So a UObject might get pushed on and by the time the user via the Lua script calls one of its member functions
-                    // it's possible that another type (e.g. FName) was transferred to Lua or shared with Lua and at that point overriding m_working_metamethods
-                    // That means that when a member function of UObject finally gets called the user_callables will actually correspond to the last transferred/shared type
-                    // How to solve ?
-                    // Not sure. One way would be to store the callables inside the lua object
-                    // I'd have to move at least the BaseObject/LocalObject/RemoteObject to LuaMadeSimple
-                    // And then you could get the userdata here as a BaseObject of some random type and then get the user_callable metamethods from there
-                    //
-                    // Maybe it's possible to push something on the side as an upvalue or something instead ?
+                    lua_pop(lua.get_lua_state(), 1);
+                    luaL_traceback(lua.get_lua_state(), lua.get_lua_state(), nullptr, 0);
+                    throw std::runtime_error{ "System: Global for __index doesn't exist." };
+                }
 
-                    if (lua.is_userdata())
+                // Push the member_name to the top of the stack for lua_raw_get
+                lua_pushvalue(lua.get_lua_state(), -2);
+                if (lua_rawget(lua.get_lua_state(), -2) != LUA_TNIL)
+                {
+                    return 1;
+                }
+                else
+                {
+                    // Pop the table from lua_getglobal and the nil from lua_rawget
+                    lua_pop(lua.get_lua_state(), 2);
+
+                    // Duplicate the userdata so that we can work with it without deleting the original from the stack
+                    lua_pushvalue(lua.get_lua_state(), -2);
+
+                    // Push onto the stack, the userdata corresponding to the MetaMethodContainer for this userdata
+                    lua_getiuservalue(lua.get_lua_state(), -1, 4);
+                    const auto& lua_object = lua.get_userdata<Type::MetaMethodContainer>(-1);
+
+                    const MetaMethods& user_callables = lua_object.metamethods;
+
+                    if (user_callables.index.has_value())
                     {
-                        // Duplicate the userdata so that we can work with it without deleting the original from the stack
-                        lua_pushvalue(lua.get_lua_state(), 1);
-
-                        // Push onto the stack, the userdata corresponding to the MetaMethodContainer for this userdata
-                        lua_getiuservalue(lua.get_lua_state(), -1, 3);
-                        const auto& lua_object = lua.get_userdata<Type::MetaMethodContainer>(-1);
-
-                        const MetaMethods& user_callables = lua_object.metamethods;
-
-                        if (user_callables.index.has_value())
-                        {
-                            user_callables.index.value()(lua);
-                        }
+                        user_callables.index.value()(lua);
                     }
                 }
             }
-
             return 1;
         });
 
         create("__newindex", metamethods.new_index);
 
         bool custom_gc_method{};
-        if (metamethods.call.has_value())
+        if (metamethods.gc.has_value())
         {
             create("__gc", metamethods.gc);
             custom_gc_method = true;
@@ -436,6 +403,7 @@ namespace RC::LuaMadeSimple
 
         create("__call", metamethods.call);
         create("__eq", metamethods.equal);
+        create("__len", metamethods.length);
 
         return custom_gc_method;
     };
@@ -509,17 +477,10 @@ namespace RC::LuaMadeSimple
 
     auto Lua::register_function(const std::string& name, const LuaFunction& function) const -> void
     {
-        if (lua_functions.contains(get_lua_state()))
-        {
-            lua_functions.find(get_lua_state())->second.functions.emplace_back(function);
-        }
-        else
-        {
-            lua_functions.emplace(get_lua_state(), LuaFunctionData{*this, {{function}}});
-        }
+        lua_functions.emplace_back(LuaFunction{function});
 
         // Upvalue for process_lua_function
-        lua_pushinteger(get_lua_state(), lua_functions.find(get_lua_state())->second.functions.size() - 1);
+        lua_pushinteger(get_lua_state(), lua_functions.size() - 1);
         lua_pushinteger(get_lua_state(), static_cast<lua_Integer>(LuaFunctionType::Global));
 
         lua_pushcclosure(get_lua_state(), &process_lua_function, 2);
@@ -544,6 +505,12 @@ namespace RC::LuaMadeSimple
     auto Lua::discard_value(int32_t force_index) const -> void
     {
         lua_remove(get_lua_state(), force_index);
+    }
+
+    auto Lua::insert_value(int32_t from_index, int32_t force_index) const -> void
+    {
+        lua_pushvalue(get_lua_state(), from_index);
+        lua_insert(get_lua_state(), force_index);
     }
 
     auto Lua::is_nil(int32_t force_index) const -> bool
@@ -782,7 +749,8 @@ namespace RC::LuaMadeSimple
 
     auto Lua::new_thread() const -> Lua&
     {
-        return *lua_instances.emplace_back(std::make_unique<Lua>(lua_newthread(get_lua_state()))).get();
+        auto new_lua_thread = lua_newthread(get_lua_state());
+        return *lua_instances.emplace(new_lua_thread, std::make_unique<Lua>(new_lua_thread)).first->second;
     }
 
     auto Lua::construct_metamethods_object(const OptionalMetaMethods& metamethods, std::optional<std::string_view> metatable_name) const -> void
@@ -796,12 +764,14 @@ namespace RC::LuaMadeSimple
                     metamethods->call,
                     metamethods->equal,
             };
-            transfer_stack_object(std::move(c), "MetaMethodContainer", std::nullopt, true);
+            new_metatable< Type::MetaMethodContainer>(metatable_name, std::nullopt);
+            transfer_stack_object(std::move(c), metatable_name, std::nullopt, true);
         }
         else
         {
             Type::MetaMethodContainer c{};
-            transfer_stack_object(std::move(c), "MetaMethodContainer", std::nullopt, true);
+            new_metatable< Type::MetaMethodContainer>(metatable_name, std::nullopt);
+            transfer_stack_object(std::move(c), metatable_name, std::nullopt, true);
         }
     }
 
@@ -840,7 +810,8 @@ namespace RC::LuaMadeSimple
 
     auto new_state() -> Lua&
     {
-        return *lua_instances.emplace_back(std::make_unique<Lua>(luaL_newstate())).get();
+        auto new_lua_state = luaL_newstate();
+        return *lua_instances.emplace(new_lua_state, std::make_unique<Lua>(new_lua_state)).first->second;
     }
 
     // dumpstack function from: https://stackoverflow.com/questions/59091462/from-c-how-can-i-print-the-contents-of-the-lua-stack/59097940#59097940
@@ -888,28 +859,28 @@ namespace RC::LuaMadeSimple
             throw_error(lua_state, std::format("[process_lua_function] A function requiring userdata as param #1 was called without userdata at param #1"));
         }
 
-        if (!lua_functions.contains(lua_state))
+        if (!lua_instances.contains(lua_state))
         {
-            throw_error(lua_state, std::format("[process_lua_function] The lua state '{}' has no global functions inside the lua_functions unordered_map", (void*)lua_state));
+            throw_error(lua_state, std::format("[process_lua_function] The lua state '{}' has no instance inside lua_instances unordered map", (void*)lua_state));
         }
 
-        LuaFunctionData& function_data = lua_functions.find(lua_state)->second;
+        Lua& data_owner = *lua_instances.find(lua_state)->second;
 
-        if (func_id > function_data.functions.size())
+        if (func_id > lua_functions.size())
         {
-            throw_error(lua_state, std::format("[process_lua_function] There was no global function with the id '{}' inside the lua_functions unordered_map", func_id));
+            throw_error(lua_state, std::format("[process_lua_function] There was no global function with the id '{}' inside the lua_functions vector", func_id));
         }
 
-        if (!function_data.functions[func_id].has_value())
+        if (!lua_functions[func_id].has_value())
         {
             throw_error(lua_state, "[process_lua_function] The optional was empty");
         }
 
         return TRY(lua_state, [&] {
-            auto return_value = function_data.functions[func_id].value()(function_data.owner);
-            for (const auto& post_process_callback : function_data.owner.m_post_function_process_callbacks)
+            auto return_value = lua_functions[func_id].value()(data_owner);
+            for (const auto& post_process_callback : data_owner.m_post_function_process_callbacks)
             {
-                post_process_callback(function_data.owner);
+                post_process_callback(data_owner);
             }
             return return_value;
         });
