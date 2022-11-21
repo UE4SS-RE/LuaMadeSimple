@@ -635,7 +635,7 @@ namespace RC::LuaMadeSimple
             }
             if (is_table(-2)) // if called from construct_metamethods_object this will be false
             {
-                lua_insert(get_lua_state(), -2);
+                lua_rotate(get_lua_state(), -2, 1);
                 lua_rawseti(get_lua_state(), -2, 1);
             }
         }
@@ -645,13 +645,13 @@ namespace RC::LuaMadeSimple
         template<typename ObjectType>
         auto transfer_stack_object(ObjectType&& object, std::optional<std::string_view> metatable_name = std::nullopt, OptionalMetaMethods metamethods = std::nullopt, bool is_metamethod_container = false) const -> void
         {
-            auto* userdata = static_cast<ObjectType*>(lua_newuserdatauv(get_lua_state(), sizeof(ObjectType), 4));
+            auto* userdata = static_cast<ObjectType*>(lua_newuserdatauv(get_lua_state(), sizeof(ObjectType), 5));
 
             // Set a user value that tells 'get_userdata()' that this userdata is a stack object owned by lua
             set_integer(UserdataInternalType::LuaOwnedStackObject);
             lua_setiuservalue(get_lua_state(), -2, 2);
 
-            // Attach metamembers table to useradata
+            // Attach metatable to useradata for reference
             if (lua_rawgeti(get_lua_state(), -2, 1) == LUA_TTABLE)
             {
                 lua_setiuservalue(get_lua_state(), -2, 3);

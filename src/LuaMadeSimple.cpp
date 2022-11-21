@@ -63,7 +63,7 @@ namespace RC::LuaMadeSimple
         if (!get_lua_instance().is_integer(-1))
         {
             get_lua_instance().discard_value();
-            get_lua_instance().throw_error("[Lua::Registry::get_number_ref] Ref was not integer");
+            get_lua_instance().throw_error("[Lua::Registry::get_integer_ref] Ref was not integer");
         }
     }
 
@@ -73,7 +73,7 @@ namespace RC::LuaMadeSimple
         if (!get_lua_instance().is_bool(-1))
         {
             get_lua_instance().discard_value();
-            get_lua_instance().throw_error("[Lua::Registry::get_number_ref] Ref was not bool");
+            get_lua_instance().throw_error("[Lua::Registry::get_bool_ref] Ref was not bool");
         }
     }
 
@@ -82,7 +82,7 @@ namespace RC::LuaMadeSimple
         if (get_lua_instance().rawgeti(LUA_REGISTRYINDEX, registry_index) != LUA_TFUNCTION)
         {
             get_lua_instance().discard_value();
-            get_lua_instance().throw_error("[Lua::Registry::get_string_ref] Ref was not function");
+            get_lua_instance().throw_error("[Lua::Registry::get_function_ref] Ref was not function");
         }
     }
 
@@ -91,7 +91,7 @@ namespace RC::LuaMadeSimple
         if (get_lua_instance().rawgeti(LUA_REGISTRYINDEX, registry_index) != LUA_TTABLE)
         {
             get_lua_instance().discard_value();
-            get_lua_instance().throw_error("[Lua::Registry::get_string_ref] Ref was not table");
+            get_lua_instance().throw_error("[Lua::Registry::get_table_ref] Ref was not table");
         }
     }
 
@@ -102,7 +102,7 @@ namespace RC::LuaMadeSimple
 
     auto Lua::Table::add_function_value_internal(Lua::LuaFunction function) const -> void
     {
-        lua_functions.emplace_back(LuaFunction{function});
+        lua_functions.emplace_back(LuaFunction{ function });
 
         // Upvalues for process_lua_function
         // Upvalue #1: Function id
@@ -390,7 +390,7 @@ namespace RC::LuaMadeSimple
                 }
             }
             return 1;
-        });
+            });
 
         create("__newindex", metamethods.new_index);
 
@@ -477,7 +477,7 @@ namespace RC::LuaMadeSimple
 
     auto Lua::register_function(const std::string& name, const LuaFunction& function) const -> void
     {
-        lua_functions.emplace_back(LuaFunction{function});
+        lua_functions.emplace_back(LuaFunction{ function });
 
         // Upvalue for process_lua_function
         lua_pushinteger(get_lua_state(), lua_functions.size() - 1);
@@ -763,6 +763,7 @@ namespace RC::LuaMadeSimple
                     metamethods->new_index,
                     metamethods->call,
                     metamethods->equal,
+                    metamethods->length,
             };
             new_metatable< Type::MetaMethodContainer>(metatable_name, std::nullopt);
             transfer_stack_object(std::move(c), metatable_name, std::nullopt, true);
